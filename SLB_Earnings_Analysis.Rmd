@@ -1,0 +1,691 @@
+---
+title: "Untitled"
+author: "Jon Haslanger"
+date: "12/1/2019"
+output: html_document
+---
+
+```{r pacakges, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(readr)
+library(rvest)
+library(stringi)
+library(stringr)
+library(rebus)
+library(ggplot2)
+library(tidytext)
+library(textdata)
+library(tidyr)
+```
+
+## Sentiment Analysis for SLB Earnings calls
+
+```{r setup}
+
+#Create empty sentiment dataframe that we will build for each lexicon
+sentiment_df <- tibble(Ticker=NA,Earnings_date=NA,Positive=NA,Negative=NA,Total_words=NA,Score=NA,Sentiment=NA, Lexicon=NA)
+
+#Company Info
+company_name <- "Schlumberger"
+ticker <- "SLB"
+
+#Transcript URLs  NOTE: Need to be logged in to get full article 
+#q3_19 <- "Q2_19_SLB.TXT"
+
+
+# <- "https://www.fool.com/earnings/call-transcripts/2019/07/19/schlumberger-nv-slb-q2-2019-earnings-call-transcri.aspx"
+
+
+#Requesting html
+html1 <- read_html("C:/Users/jhasl/OneDrive/Documents/Text Analysis/Project_SWT/Q22019ResultsSA.html")
+
+
+#Reading the body of the html, and converting it to a readable text format
+transcript_text <- html_text(html_nodes(html1, "#a-body"))
+
+#Seperating the text by new line characters in html code
+transcript_text <- strsplit(transcript_text, "\n") %>% unlist()
+
+
+#Remove empty lines
+transcript_text <- transcript_text[!stri_isempty(transcript_text)]
+
+#Getting the earnings date
+earnings_date <- html_text(html_nodes(html1, "time")) %>% paste0(collapse = "")
+
+
+```
+
+
+
+```{r SplitText, echo=FALSE}
+#Create pattern to grab relevant names such as Analyst and Executives. 
+
+
+#Using Rebus
+pattern1 <- capture(upper() %R% one_or_more(WRD) %R% SPC %R%
+  upper() %R% one_or_more(WRD)) %R% " - " %R% capture(one_or_more(WRD) %R%
+  optional(char_class("- ,")) %R% zero_or_more(WRD %R% SPC %R% WRD %R% "-" %R% WRD))
+
+
+#Give the names all common seperators
+transcript_text <- gsub("–","-",transcript_text)
+
+
+
+#REGEX pattern to search for the starting index containing executive names. 
+idx_e <- min(which(str_detect(transcript_text, "[[:upper:]][\\w]+ -")))
+
+
+#Dropping everything before the start of Executive names, and resetting the index back to 1
+transcript_text <- transcript_text[idx_e:length(transcript_text)]
+idx_e <- 1
+
+
+#Repeating to find the starting index for the analyst names
+idx_a <- min(which(!str_detect(transcript_text, "[[:upper:]][\\w]+ -")))
+
+
+#Executive names will start from the starting index, idx_e, to 1 row before the analysts starting index, idx_a. We will use the Rebus pattern we created to extract all names from our resulting vectors
+exec <- transcript_text[idx_e:(idx_a-1)]
+exec <- str_match(exec, pattern1)
+exec <- exec[1:nrow(exec),2]
+exec <- append(exec, "Olivier Le Peuch")
+#exec <- c("Simon Farrant", "Olivier Le Peuch", "Paal Kibsgaard", "Simon Ayat")
+
+#Repeat for the Analyst names. The ending index for the analyst names is the row before the opening remarks
+idx_o <- min(which(!str_detect(transcript_text, "[[:upper:]][\\w]+ -"))[-1]) - 1
+analyst <- transcript_text[(idx_a+1):idx_o]
+analyst <- str_match(analyst, pattern1)
+analyst <- analyst[1:nrow(analyst),2]
+analyst <- append(analyst, "Operator")
+
+
+#Save just the transcript text. Skip straight to the operators opening remarks
+transcript_text <- transcript_text[(idx_o +1) : length(transcript_text)]
+
+
+#Splitting up the call between management on the conf_call and the Q&A session
+
+#Start with Conf_call section and find the start of the Q&A
+idx_c <- min(which(str_detect(transcript_text, paste(exec,collapse = "$|"))))
+idx_q <- which(str_detect(transcript_text, "Question-and-Answer")) - 1
+conf_call <- transcript_text[idx_c:idx_q]
+
+
+#Now for the QNA section
+idx_q <- which(str_detect(transcript_text, "Question-and-Answer")) + 1
+qna <- transcript_text[idx_q:length(transcript_text)]
+
+
+
+#Get locations of the names so we can label the text in order
+conf_location_exec <- str_which(conf_call, paste(exec,collapse = "$|^"))
+exec_names_conf <- conf_call[conf_location_exec]
+all_names_conf <- tibble(name = conf_call[conf_location_exec], id = conf_location_exec)
+
+
+
+#Get locations of the names so we can label the text in order
+qna_location_analysts <- str_which(qna, paste(analyst, collapse = "$|^"))
+qna_location_exec <- str_which(qna, paste(exec, collapse = "$|^"))
+
+
+#Create tibble then combine and arrange by row id to keep the correct order
+analyst_names_qna <- tibble(name = qna[qna_location_analysts], id = qna_location_analysts)
+exec_names_qna <- tibble(name = qna[qna_location_exec], id = qna_location_exec)
+all_names_qna <- bind_rows(analyst_names_qna, exec_names_qna) %>% arrange(id)
+
+qna_full <- tibble(names=all_names_qna$name[1], text=qna[1])
+#qna_full <= NULL
+name <- all_names_qna$name[1]
+
+for (i in 1:length(qna)) {
+  if(i %in% all_names_qna$id){
+    name <- qna[i]
+  } else {
+    qna_full <- add_row(qna_full, names = name, text = qna[i])
+  }
+} 
+
+qna_full <- qna_full[-1,]
+
+conf_call_df <-tibble(names=all_names_conf$name[1], text=conf_call[1])
+name <- all_names_conf$name[1]
+for (i in 2:length(conf_call)) {
+  if(i %in% all_names_conf$id){
+    name <- conf_call[i]
+  } else {
+    conf_call_df <- add_row(conf_call_df, names = name, text = conf_call[i])
+  }
+}
+
+conf_call_df <- conf_call_df[-1,]
+
+```
+
+The first 3 Q and a LINES
+
+```{r QandA, echo=FALSE}
+
+kableExtra::kable(head(qna_full,3)) %>% kableExtra::kable_styling()
+```
+
+```{r clean, echo=FALSE}
+library(qdap)
+library(tm)
+#Create function to clean the text
+qdap_clean <- function(x){
+  x <- replace_abbreviation(x)
+  x <- replace_contraction(x)
+  #x <- replace_number(x)
+  x <- replace_ordinal(x)
+  #x <- replace_symbol(x)
+  x<- gsub("[’‘]","",x)
+  x <- tolower(x)
+  return(x)
+}
+
+
+#Clean each of these
+conf_call_df$text <- qdap_clean(conf_call_df$text)
+qna_full$text <- qdap_clean(qna_full$text)
+
+#Create corpus object
+all_corpus <- c(conf = conf_call_df$text, qna = qna_full$text) %>% VectorSource() %>% VCorpus()
+
+
+#convert our name vectors to lowercase to match and remove from our text
+analyst_lowsplt <- as.character(str_split(tolower(analyst), pattern = " ", simplify = TRUE))
+exec_lowsplt <- as.character(str_split(tolower(exec), pattern = " ", simplify = TRUE))
+
+
+#Clean corpus function - Since it is a earnings call we will hear alot of names that we may want to remove for analysis purposes. (executive names, analyst names, operator)
+clean_corpus <-function(corpus){
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus <- tm_map(corpus, removeWords, c(stopwords("en"), company_name , analyst_lowsplt, exec_lowsplt))
+  return(corpus)
+}
+
+
+all_corpus_clean <- clean_corpus(all_corpus)
+
+```
+
+
+
+```{r BingScoring, echo=FALSE}
+
+
+#Create tibble object
+tibble_tidy <- data.frame(doc_id = c(conf_call_df$names, qna_full$names), text = c(conf_call_df$text, qna_full$text)) %>% DataframeSource() %>% VCorpus() %>% tidy() 
+
+
+#Label according to who is speaking
+z <- 0
+for(i in tibble_tidy$id){
+  z <- z+1
+  if(i %in% analyst){
+    tibble_tidy$author[z] <- "analyst"
+  } else tibble_tidy$author[z] <- "management"
+}
+
+
+#Keep only the rows you are interested in
+tibble_tidy <- tibble_tidy[,c("author", "id", "text")]
+
+#Unnest tokens, which converts all text to lowercase, and seperates our text by word
+text_tidy <- tibble_tidy %>% mutate(line_number = 1:nrow(.)) %>% group_by(author) %>% unnest_tokens(word, text) %>% ungroup()
+
+
+#Bing lexicon
+bing <- tidytext::get_sentiments("bing")
+
+#We want to keep "great" as this is very positive in financial sentiment
+stop_words <- tidytext::stop_words %>% filter(word != "great")
+
+#Create tiddy object that is filtered and scored
+text_tidy_bing <- text_tidy %>% inner_join(bing, by = "word") %>% anti_join(tidytext::stop_words, by = "word")
+
+#Top 10 most frequent bing scored words in our text.
+head(text_tidy_bing %>% count(word, sentiment, sort = TRUE),50)
+```
+
+```{r MostFrequentTerms, echo=FALSE}
+
+
+
+```
+
+```{r SentimentByAuthor, echo=FALSE}
+#Seperate sentiment by author
+author_sentiment_bing <- text_tidy_bing %>% count(author, sentiment) %>% group_by(author) %>%  mutate(percent = n / sum(n))
+
+
+bingplot_q2 <- ggplot(author_sentiment_bing, aes(author, percent, fill = sentiment)) + geom_col() + theme(axis.text.x = element_text(angle = 0)) + labs(x = "Author", y = "Total Percentage",title = "Makeup of Positive/Negative Sentiment", subtitle="Bing: Q2-19") 
+
+bingplot_q2
+
+#gridExtra::grid.arrange(bingplot_q1,bingplot_q4,nrow=1)
+```
+
+```{r NRC, ECHO = FALSE}
+#NRC lexicon
+nrc <- tidytext::get_sentiments("nrc")
+
+nrc_score_tidy <- text_tidy %>% inner_join(nrc, by = "word") %>% anti_join(stop_words, by = "word") 
+
+#Check for possible adjustments
+head(nrc_score_tidy %>% count(word,sentiment, sort = T),100)
+
+nrc_scores_group_radar_q2 <- nrc_score_tidy %>% filter(!grepl("positive|negative", sentiment)) %>% count(author, sentiment) %>% spread(author,n)
+
+radarchart::chartJSRadar(nrc_scores_group_radar_q2, main = "Wheel of Emotions Q2-19")
+```
+
+
+```{r Loughran&McDonald, ECHO = FALSE}
+
+#Loughran & Mcdonald lexicon
+loughran_mcdonald <- lexicon::hash_sentiment_loughran_mcdonald
+
+
+#Create tiddy object that is filtered and scored
+text_tidy_hash_sentiment_loughran_mcdonald <- text_tidy %>% inner_join(loughran_mcdonald, by = c("word" = "x")) %>% anti_join(stop_words, by = "word")
+
+
+#Top 10 most frequent loughran_mcdonald scored words in our text.
+head(text_tidy_hash_sentiment_loughran_mcdonald %>% count(word, y, sort = TRUE),50)
+
+#author sentiment from Lourghran_Mcdonald
+author_sentiment_LM <- text_tidy_hash_sentiment_loughran_mcdonald %>% count(author, y) %>% group_by(author) %>%  mutate(percent = n / sum(n))
+
+LMplot_q2 <- ggplot(author_sentiment_LM, aes(author, percent, fill = y)) + geom_col() + theme(axis.text.x = element_text(angle = 0)) + labs(x = "Author", y = "Total Percentage",title = "Makeup of Positive/Negative Sentiment", subtitle="Loughran Mcdonald: Q2-19") 
+
+LMplot_q2
+
+```
+
+
+
+
+
+
+```{r Watson}
+
+username = "apikey"
+password = "RBjGtTs6McRFcuSNp-MlPwoDbxm_rsEjpKipF7NxW2q3"
+
+#install.packages('tm')
+#install.packages("devtools")
+#devtools::install_github("Brunel-Visualization/Brunel", subdir="R", ref="v2.3", force=TRUE)
+library(brunel)
+library(tm)
+library(httr)
+library(jsonlite)
+
+# params = {
+#         'version': '2018-11-16',
+#     }
+#     headers = { 
+#         'Content-Type': 'application/json',
+#     }
+#     watson_options = {
+#       "text": TEXT,
+#       "features": {
+#         "entities": {
+#           "sentiment": True,
+#           "emotion": False,
+#           "limit": 100
+#         }
+#       }
+
+watsonNLUtoDF <- function(data, username, password, verbose = F, language = 'en') {
+  
+  ## Url for Watson NLU service on IBM Cloud used to POST (send) content to the service to have it analyzed.  
+  ## For more details: https://www.ibm.com/watson/developercloud/natural-language-understanding/api/v1/#post-analyze 
+  base_url <-  "https://gateway.watsonplatform.net/natural-language-understanding/api/v1/analyze?version=2018-11-16"
+  
+  
+    ## Initialize Empty DataFrames
+  conceptsDF <- data.frame()
+  keywordsDF <- data.frame()
+  sentimentDF <- data.frame()
+  categoriesDF <- data.frame()
+  analyzedTextDF <- data.frame()
+  
+  ## Loop over each id, identify the type and send the value to Watson
+  for (i in 1:nrow(data)){
+    try({
+      
+      id <- data$id[i]
+      value <- data$value[i]
+      
+      ## Define the JSON payload for NLU
+      body <- list(api_endpoint = value, 
+                   features = list(
+                     categories = {},
+                     concepts = {},
+                     keywords = {},
+                     sentiment = {}),
+                   language = language,
+                   return_analyzed_text = TRUE)
+      
+      ## Provide the correct type for each id
+      names(body)[1] <- data$type[i]
+      
+      if(verbose == T){
+      print(paste("Sending", data$type[i], "for", id, "to Watson NLU..."))
+      }
+      
+      ## Hit the API and return JSON
+      watsonResponse <- POST(base_url,
+                             content_type_json(),
+                             authenticate(username, password, type = "basic"),
+                             body = toJSON(body, auto_unbox = T)) 
+
+        ## Parse JSON into DataFrames
+      concepts <- data.frame(id = id, 
+                             fromJSON(toJSON(content(watsonResponse), pretty = T), flatten = T)$concepts,
+                             stringsAsFactors = F)
+
+      keywords <- data.frame(id = id, 
+                             fromJSON(toJSON(content(watsonResponse), pretty = T), flatten = T)$keywords,
+                             stringsAsFactors = F)
+      
+      sentiment <- data.frame(id = id, 
+                             fromJSON(toJSON(content(watsonResponse), pretty = T), flatten = T)$sentiment,
+                             stringsAsFactors = F)
+      
+      categories <- data.frame(id = id,
+                               fromJSON(toJSON(content(watsonResponse), pretty = T), flatten = T)$categories,
+                               stringsAsFactors = F)
+      
+      analyzedText <- data.frame(id = id,
+                                 fromJSON(toJSON(content(watsonResponse), pretty = T), flatten = T)$analyzed_text,
+                                 stringsAsFactors = F)
+      
+      
+      ## Append results to output DataFrames
+      conceptsDF <- rbind(conceptsDF, concepts)
+      keywordsDF <- rbind(keywordsDF, keywords)
+      sentimentDF <- rbind(sentimentDF, sentiment)
+      categoriesDF <- rbind(categoriesDF, categories)
+      analyzedTextDF <- rbind(analyzedTextDF, analyzedText)
+      
+      if(verbose == T) {
+      print(paste("Iteration", i, "of", nrow(data), "complete."))
+      }
+    })
+  }
+  resultsList <- list(conceptsDF, keywordsDF, sentimentDF, categoriesDF, analyzedTextDF, watsonResponse)
+  names(resultsList) <- c("conceptsDF", "keywordsDF", "sentimentDF", "categoriesDF", "analyzedTextDF", "response")
+  return(resultsList)
+}
+
+
+```
+
+
+```{r WatsonQNA}
+
+qna_group <- qna_full %>%
+  group_by(names) %>%
+  summarise(text = paste0(text, collapse = ""))
+
+watsonDF <- data.frame(id = qna_full$names, type = 'text', value = qna_full$text)
+
+watsonResponse <- watsonNLUtoDF(head(watsonDF), username, password)
+
+```
+```{r WatsonFun}
+
+# Set functions
+
+###### Function 1 - ibm_sent
+
+#' Analyze some text for sentiment using IBM Watson.
+#' @description This returns the result of the sentiment analysis on the provided text.
+#' @param s_username Username.
+#' @param s_password Password.
+#' @param s_text Text to be analysed.
+#' @keywords ibm watson sentiment tone analysis api
+#' @export
+#' @examples
+#' ibm_sent("s_username", "s_password", "s_text")
+#' ibm_sent("xxx-xxx-xxx", "abcdeabcde", "this is some text to analyse for sentiment")
+
+
+ibm_sent <- function(s_username, s_password, s_text){
+  s_URL <- "https://gateway.watsonplatform.net/natural-language-understanding/api/v1/analyze"
+  features <- "emotion,sentiment"
+  version <- '2018-11-16'
+  
+  # Set main function
+  output <- content(GET(s_URL,
+                        authenticate(s_username, s_password),
+                        query = list(version=version,
+                                     text=s_text,
+                                     features=features,
+                                     language='en'),
+                        add_headers(Accept="application/json"),
+                        verbose(FALSE)))
+  
+  # Extract consistent first and second level list items
+  result_df <- cbind(as.tibble(flatten(as.data.frame(output$usage))),
+                     as.tibble(flatten(as.data.frame(output$sentiment$document))),
+                      as.tibble(flatten(as.data.frame(output$emotion$document)))) %>%
+    mutate(language = output$language)
+  
+  # Extract items of unknown quantity and add into tibble from above
+  for(i in seq_along(output$keywords)){
+    result_df <- result_df %>% 
+      mutate(!!paste0("keywd_text_",i) := result$keywords[[i]]$text) %>% 
+      mutate(!!paste0("keywd_relevance_",i) := result$keywords[[i]]$relevance)
+  }
+  
+  result_df <- result_df
+}
+
+###### Function 2 - ibm_tone
+
+#' Analyze some text for tone using IBM Watson.
+#' @description This returns the result of the tone analysis on the provided text.
+#' @param t_username Username.
+#' @param t_password Password.
+#' @param t_text Text to be analysed.
+#' @keywords ibm watson sentiment tone analysis api
+#' @export
+#' @examples
+#' ibm_sent("t_username", "t_password", "t_text")
+#' ibm_sent("xxx-xxx-xxx", "abcdeabcde", "this is some text to analyse for tone")
+
+
+ibm_tone <- function(t_username, t_password, t_text){
+  # Set variables
+  t_URL <- "https://watson-api-explorer.mybluemix.net/tone-analyzer/api/v3/tone"
+  t_sentences <- "true"
+  t_tones <- "emotion,language,social"
+  version <- Sys.Date()
+  
+  # Set main function
+  result <- content(GET(t_URL,
+                        authenticate(t_username, t_password),
+                        query = list(version=version,
+                                     text = t_text,
+                                     sentences=t_sentences,
+                                     tones=t_tones),
+                        add_headers(Accept="application/json"),
+                        verbose()))
+  # Create tibble with one column - number of tones
+  result_df <- as.tibble(length(result$document_tone$tones)) %>%
+    rename(tones = 1)
+  
+  # Loop through and extract items
+  for(i in seq_along(result$document_tone$tones)){
+    result_df <- result_df %>% 
+      mutate(!!paste0("score_",i) := result$document_tone$tones[[i]]$score) %>% 
+      mutate(!!paste0("tone_id_",i) := result$document_tone$tones[[i]]$tone_id) %>% 
+      mutate(!!paste0("tone_name_",i) := result$document_tone$tones[[i]]$tone_name)
+  }
+  
+  result_df <- result_df
+}
+
+
+username = "apikey"
+password = "RBjGtTs6McRFcuSNp-MlPwoDbxm_rsEjpKipF7NxW2q3"
+
+texts = 'thank you, simon, and good morning, everyone. our second quarter revenue increased 5% sequentially, driven by international activity. our international business grew 8%, outperforming international rig count growth of 6%, while north america revenue grew 2% sequentially. i am pleased with the progress made and proud of our team performance, many of whom i met during the quarter on my visits to our global operations.'
+
+
+#final <- ibm_sent(s_username = username,s_password =  password,s_text = as.String(texts))
+
+```
+
+
+```{r WatsonSent}
+
+
+#cancluate the sentiment from watson for each line of the QnA
+sentimentDF <- data.frame()
+
+for (i in 1:nrow(qna_full)) {
+  sentResult <- ibm_sent(s_username = username,s_password =  password,s_text = as.String(qna_full$text[i]))
+  sentimentDF <- rbind(sentimentDF, sentResult)
+  print(paste("Iteration", i, "of", nrow(qna_full), "complete."))
+}
+
+qna_Watson <- cbind(qna_full, sentimentDF)
+
+z <- 0
+for(i in qna_Watson$names){
+  z <- z+1
+  if(i %in% analyst){
+    qna_Watson$author[z] <- "analyst"
+  } else qna_Watson$author[z] <- "management"
+}
+
+
+#cancluate the sentiment from watson for each line of the Presentation
+sentimentDF <- data.frame()
+
+for (i in 1:nrow(conf_call_df)) {
+  sentResult <- ibm_sent(s_username = username,s_password =  password,s_text = as.String(conf_call_df$text[i]))
+  sentimentDF <- rbind(sentimentDF, sentResult)
+  print(paste("Iteration", i, "of", nrow(qna_full), "complete."))
+}
+
+conf_Call_Watson <- cbind(conf_call_df, sentimentDF)
+
+
+z <- 0
+for(i in conf_Call_Watson$names){
+  z <- z+1
+  if(i %in% analyst){
+    conf_Call_Watson$author[z] <- "analyst"
+  } else conf_Call_Watson$author[z] <- "management"
+}
+
+#create a combined data set for both the confrence call and the Q&A
+Full_Watson <- rbind(conf_Call_Watson, qna_Watson)
+
+
+
+```
+
+```{r watsonSpider, echo=FALSE}
+library(fmsb)
+watson_group_radar_q2 <- Full_Watson %>% filter(!grepl("positive|negative", sentiment)) %>% count(author, sentiment) %>% spread(author,n)
+
+watson_group_radar_q2 <- Full_Watson %>% group_by(author) %>% summarize(
+  sadness = mean(emotion.sadness),
+  joy = mean(emotion.joy), 
+  fear= mean(emotion.fear), 
+  disgust = mean(emotion.disgust), 
+  anger = mean(emotion.anger) 
+)
+   
+watson_group_radar_q2 <- as.data.frame((watson_group_radar_q2))
+#watson_group_radar_q2 <- watson_group_radar_q2[-1,]
+#names(watson_group_radar_q2) <- c("analyst", "management")
+
+fmsb::radarchart(watson_group_radar_q2)
+
+
+#radarchart::chartJSRadar(watson_group_radar_q2, main = "NLP Sentiments Q2-19")
+
+```
+
+```{r positivity}
+
+```
+
+
+
+```{python watson}
+import numpy as np
+#matplotlib inline
+#config InlineBackend.figure_format = 'retina'
+import matplotlib
+import matplotlib.pyplot as plt
+import seaborn as sns
+# !sudo python3 -m pip install -U pandas
+import pandas as pd 
+import requests
+import json
+
+def processTEXT(TEXT):
+    endpoint_watson = "https://gateway.watsonplatform.net/natural-language-understanding/api/v1/analyze"
+    params = {
+        'version': '2018-11-16',
+    }
+    headers = { 
+        'Content-Type': 'application/json',
+    }
+    watson_options = {
+      "text": TEXT,
+      "features": {
+        "entities": {
+          "sentiment": True,
+          "emotion": False,
+          "limit": 100
+        }
+      }
+    }
+    username = "apikey"
+    password = "RBjGtTs6McRFcuSNp-MlPwoDbxm_rsEjpKipF7NxW2q3"
+
+    resp = requests.post(endpoint_watson, 
+                         data=json.dumps(watson_options), 
+                         headers=headers, 
+                         params=params, 
+                         auth=(username, password) 
+                        )
+    return resp.json()
+
+
+text = '''
+I got their Egg & Cheese sandwich on a Whole Wheat Everything Bagel. 
+First off, I loved loved loved the texture of the bagel itself. 
+It was very chewy yet soft, which is a top feature for a NY style bagel. 
+However, I thought there could've been more seasoning on top of 
+the bagel as I found the bagel itself to be a bit bland. 
+
+Speaking of bland, I thought the egg and cheese filling were also quite bland. 
+This was definitely lacking salt and pepper in the eggs and the cheese didn't
+really add too much flavor either, which was really disappointing! 
+My mom also had the same complaint with her bagel sandwich 
+(she had the egg sandwich on a blueberry bagel) so I definitely wasn't 
+the only one.
+
+'''
+
+data = getSentiment(text)
+
+data
+
+```
+
